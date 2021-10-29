@@ -35,7 +35,6 @@ interface Snapshot {
 }
 
 export type SchemasList = ReadonlyArray<SchemaDto>;
-export type SchemaCategory = { displayName: string; name?: string; schemas: SchemaDto[]; count: number; categories: Array<SchemaCategory> };
 
 @Injectable()
 export class SchemasState extends State<Snapshot> {
@@ -57,14 +56,8 @@ export class SchemasState extends State<Snapshot> {
     public publishedSchemas =
         this.projectFrom(this.schemas, x => x.filter(s => s.isPublished));
 
-    public addedCategories =
-        this.project(x => x.categories);
-
-    public categories =
-        this.projectFrom2(this.schemas, this.addedCategories, (s, c) => buildNestedCategories(c, s));
-
     public categoryNames =
-        this.projectFrom2(this.schemas, this.addedCategories, (s, c) => new Set(buildFlatCategories(c, s).map(x => x.name).filter(x => x !== undefined)));
+        this.project(x => x.categories);
 
     public get schemaId() {
         return this.snapshot.selectedSchema?.id || '';
@@ -176,7 +169,7 @@ export class SchemasState extends State<Snapshot> {
 
     public addCategory(name: string) {
         this.next(s => {
-            const categories = new Set([...s.categories, name.trim()]);
+            const categories = new Set([...s.categories, name]);
 
             return { ...s, categories };
         }, 'Category Added');
@@ -184,7 +177,7 @@ export class SchemasState extends State<Snapshot> {
 
     public removeCategory(name: string) {
         this.next(s => {
-            const categories = new Set([...s.categories].removed(name));
+            const categories = new Set([...s.categories].remove(name));
 
             return { ...s, categories };
         }, 'Category Removed');
@@ -370,23 +363,42 @@ function getField(x: SchemaDto, request: AddFieldDto, parent?: RootFieldDto | nu
     }
 }
 
+export type SchemaCategory = {
+    displayName: string;
+    name?: string;
+    schemas: SchemaDto[];
+    schemaTotalCount: number;
+};
+
 const SPECIAL_SCHEMAS = 'i18n:common.schemas';
 const SPECIAL_COMPONENTS = 'i18n:common.components';
-const dotTestRegex = /[^\s]\.[^\s]/;
 
-function buildFlatCategories(categories: Set<string>, allSchemas: SchemasList): ReadonlyArray<SchemaCategory> {
+export function getCategoryTree(allSchemas: ReadonlyArray<SchemaDto>, categories: Set<string>, filter?: string) {
+    let match = (_: SchemaDto) => true;
+
+    if (filter) {
+        const terms = filter.split(' ').map(filter => new RegExp(filter.trim(), 'i'));
+
+        const matches = (value: string | undefined | null) => {
+            return !!value && terms.every(term => value.search(term) >= 0);
+        };
+
+        match = schema =>
+            matches(schema.name) ||
+            matches(schema.properties.label) ||
+            matches(schema.properties.hints);
+    }
+
     const schemas: SchemaCategory = {
         displayName: SPECIAL_SCHEMAS,
         schemas: [],
-        count: 0,
-        categories: [],
+        schemaTotalCount: 0,
     };
 
     const components: SchemaCategory = {
         displayName: SPECIAL_COMPONENTS,
         schemas: [],
-        count: 0,
-        categories: [],
+        schemaTotalCount: 0,
     };
 
     const result: SchemaCategory[] = [schemas, components];
@@ -396,100 +408,44 @@ function buildFlatCategories(categories: Set<string>, allSchemas: SchemasList): 
             displayName: name,
             name,
             schemas: [],
-            count: 0,
-            categories: [],
+            schemaTotalCount: 0,
         });
+    }
 
-        addAllParentCategories(name, result, 0);
+    function add(schema: SchemaDto, category: SchemaCategory) {
+        category.schemaTotalCount++;
+
+        if (match(schema)) {
+            category.schemas.push(schema);
+        }
     }
 
     for (const schema of allSchemas) {
         const name = schema.category;
 
         if (name) {
-            const category = getOrAddCategory(result, name);
-            category.schemas.push(schema);
-            category.count += 1;
-            addAllParentCategories(name, result, category.count);
+            let category = result.find(x => x.name === name);
+
+            if (!category) {
+                category = {
+                    displayName: name,
+                    name,
+                    schemas: [],
+                    schemaTotalCount: 0,
+                };
+
+                result.push(category);
+            }
+
+            add(schema, category);
         } else if (schema.type === 'Component') {
-            components.schemas.push(schema);
-            components.count += 1;
+            add(schema, components);
         } else {
-            schemas.schemas.push(schema);
-            schemas.count += 1;
+            add(schema, schemas);
         }
     }
 
-    return result.sortByString(x => x.displayName);
-}
-
-function addAllParentCategories(name: string, result: SchemaCategory[], count: number) {
-    if (dotTestRegex.test(name)) {
-        // Split on the dot and add all the parent categories if they don't already exist
-        const parts = name.split('.');
-        let nameBuilder = '';
-        for (let i = 0; i < parts.length - 1; i++) {
-            if (i > 0) {
-                nameBuilder += '.';
-            }
-            nameBuilder += parts[i];
-            const category = getOrAddCategory(result, nameBuilder);
-            category.count += count;
-        }
-    }
-}
-
-function getOrAddCategory(list: SchemaCategory[], name: string): SchemaCategory {
-    let category = list.find(x => x.name === name);
-    if (!category) {
-        category = {
-            displayName: name,
-            name,
-            schemas: [],
-            count: 0,
-            categories: [],
-        };
-
-        list.push(category);
-    }
-    return category;
-}
-
-function buildNestedCategories(categories: Set<string>, allSchemas: SchemasList): ReadonlyArray<SchemaCategory> {
-    const result: SchemaCategory[] = [];
-
-    const flatCategories = buildFlatCategories(categories, allSchemas);
-    // Loop categories and nest each in its parent
-    for (const cat of flatCategories) {
-        const name = cat.name;
-        if (name) {
-            if (dotTestRegex.test(name)) {
-                const parentName = name.substr(0, name.lastIndexOf('.'));
-                const parent = flatCategories.find(c => c.name === parentName);
-                if (parent) {
-                    cat.displayName = name.substring(parentName.length + 1);
-                    parent.count += cat.count;
-                    parent.categories.push(cat);
-                }
-            } else {
-                // Add top-level categories to the output
-                result.push(cat);
-            }
-        }
-    }
+    result.sortByString(x => x.displayName);
 
     return result;
-}
-
-export function buildSchemaFilterFunction(filter: string): (schema: SchemaDto) => boolean {
-    const terms = filter.split(' ').map(filter => new RegExp(filter.trim(), 'i'));
-
-    const matches = (value: string | undefined | null) => {
-        return !!value && terms.every(term => value.search(term) >= 0);
-    };
-
-    return (schema: SchemaDto) =>
-        matches(schema.name) ||
-        matches(schema.properties.label) ||
-        matches(schema.properties.hints);
 }
